@@ -1,4 +1,7 @@
 # 按日期补跑 AI 增强与 Markdown（复用 data 分支上已有的原始 jsonl）
+# 触发方式：
+# 1) Actions → arXiv-backfill-ai-enhanced → Run workflow，填写 target_dates
+# 2) 写入/更新 .github/trigger-backfill-dates.txt 并推送到默认分支
 name: arXiv-backfill-ai-enhanced
 
 on:
@@ -8,6 +11,11 @@ on:
         description: "Comma-separated dates to reprocess (YYYY-MM-DD), e.g. 2026-09-01,2026-09-02"
         required: true
         type: string
+  push:
+    branches:
+      - liunianai1-patch-1
+    paths:
+      - '.github/trigger-backfill-dates.txt'
 
 jobs:
   backfill:
@@ -27,7 +35,12 @@ jobs:
         source .venv/bin/activate
         mkdir -p data assets
 
-        DATES_RAW="${{ inputs.target_dates }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          DATES_RAW="${{ inputs.target_dates }}"
+        else
+          DATES_RAW="$(tr -d '\r' < .github/trigger-backfill-dates.txt | head -n 1)"
+        fi
+
         DATES=$(echo "$DATES_RAW" | tr ',' ' ' | xargs)
         if [ -z "$DATES" ]; then
           echo "No target dates provided"
