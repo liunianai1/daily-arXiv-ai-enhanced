@@ -51,12 +51,12 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 # 约定接口返回 {"sensitive": true/false, ...}
                 return result.get("sensitive", True)
             else:
-                # 如果接口异常，默认不触发敏感词
+                # 如果接口异常，默认不触发敏感词（fail-open，避免 429/5xx 导致全量丢弃）
                 print(f"Sensitive check failed with status {resp.status_code}", file=sys.stderr)
-                return True
+                return False
         except Exception as e:
             print(f"Sensitive check error: {e}", file=sys.stderr)
-            return True
+            return False
 
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""
@@ -251,10 +251,19 @@ def main():
     )
     
     # 保存结果
+    kept = [item for item in processed_data if item is not None]
     with open(target_file, "w") as f:
-        for item in processed_data:
-            if item is not None:
-                f.write(json.dumps(item) + "\n")
+        for item in kept:
+            f.write(json.dumps(item) + "\n")
+
+    if not kept:
+        print(
+            f"No papers kept after enhancement for {args.data}; refusing to write empty output as success.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"Wrote {len(kept)}/{len(data)} papers to {target_file}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

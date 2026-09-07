@@ -1,0 +1,138 @@
+# 按日期补跑 AI 增强与 Markdown（复用 data 分支上已有的原始 jsonl）
+name: arXiv-backfill-ai-enhanced
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_dates:
+        description: "Comma-separated dates to reprocess (YYYY-MM-DD), e.g. 2026-09-01,2026-09-02"
+        required: true
+        type: string
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        uv sync
+
+    - name: Fetch raw jsonl from data branch
+      id: prepare
+      run: |
+        set -euo pipefail
+        source .venv/bin/activate
+        mkdir -p data assets
+
+        DATES_RAW="${{ inputs.target_dates }}"
+        DATES=$(echo "$DATES_RAW" | tr ',' ' ' | xargs)
+        if [ -z "$DATES" ]; then
+          echo "No target dates provided"
+          exit 1
+        fi
+        echo "dates=$DATES" >> "$GITHUB_OUTPUT"
+        echo "准备补跑日期: $DATES"
+
+        git fetch origin data:data
+        for d in $DATES; do
+          echo "获取 data/$d.jsonl ..."
+          git show "data:data/${d}.jsonl" > "data/${d}.jsonl"
+          if [ ! -s "data/${d}.jsonl" ]; then
+            echo "原始文件为空或不存在: data/${d}.jsonl"
+            exit 1
+          fi
+          echo "  lines=$(wc -l < "data/${d}.jsonl")"
+        done
+
+    - name: AI Enhancement Processing
+      run: |
+        set -euo pipefail
+        source .venv/bin/activate
+        export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+        export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
+        export LANGUAGE="${{ vars.LANGUAGE }}"
+        export MODEL_NAME="${{ vars.MODEL_NAME }}"
+        export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
+
+        cd ai
+        for d in ${{ steps.prepare.outputs.dates }}; do
+          echo "===== AI enhance $d ====="
+          python enhance.py --data "../data/${d}.jsonl"
+          AI_FILE="../data/${d}_AI_enhanced_${LANGUAGE}.jsonl"
+          if [ ! -s "$AI_FILE" ]; then
+            echo "AI 增强结果为空: $AI_FILE"
+            exit 1
+          fi
+          echo "AI 文件行数: $(wc -l < "$AI_FILE")"
+        done
+
+    - name: Convert to Markdown
+      run: |
+        set -euo pipefail
+        source .venv/bin/activate
+        export LANGUAGE="${{ vars.LANGUAGE }}"
+        export CATEGORIES="${{ vars.CATEGORIES }}"
+
+        cd to_md
+        for d in ${{ steps.prepare.outputs.dates }}; do
+          echo "===== Convert $d ====="
+          AI_FILE="../data/${d}_AI_enhanced_${LANGUAGE}.jsonl"
+          python convert.py --data "$AI_FILE"
+          MD_FILE="../data/${d}.md"
+          if [ ! -s "$MD_FILE" ]; then
+            echo "Markdown 为空: $MD_FILE"
+            exit 1
+          fi
+          # 避免只写出空目录页
+          if [ "$(wc -c < "$MD_FILE")" -lt 100 ]; then
+            echo "Markdown 过短，疑似空结果: $MD_FILE"
+            exit 1
+          fi
+        done
+
+    - name: Prepare data files for data branch
+      run: |
+        mkdir -p /tmp/data_files/data
+        cp -r data/* /tmp/data_files/data/
+        echo "prepared dates: ${{ steps.prepare.outputs.dates }}"
+
+    - name: Commit and push to data branch
+      run: |
+        set -euo pipefail
+        git config --global user.email "${{ vars.EMAIL }}"
+        git config --global user.name "${{ vars.NAME }}"
+
+        rm -rf data/*.jsonl data/*.md assets/file-list.txt 2>/dev/null || true
+
+        git fetch origin data:data
+        git checkout data
+        git pull origin data || true
+
+        mkdir -p data assets
+        cp -r /tmp/data_files/data/* data/
+        # 基于 data 分支全部文件重建列表，避免补跑覆盖掉其它日期
+        ls data/*.jsonl | sed 's|data/||' | sort > assets/file-list.txt
+
+        git add data/* assets/file-list.txt
+        if git diff --staged --quiet; then
+          echo "没有数据变更需要提交"
+        else
+          DATES="${{ steps.prepare.outputs.dates }}"
+          git commit -m "backfill: reprocess AI enhancement for ${DATES}"
+        fi
+
+        git config pull.rebase true
+        for i in 1 2 3; do
+          if git push origin data; then
+            echo "data 分支推送成功"
+            break
+          fi
+          git pull origin data --no-edit || true
+          if [ "$i" -eq 3 ]; then
+            echo "推送失败"
+            exit 1
+          fi
+        done
