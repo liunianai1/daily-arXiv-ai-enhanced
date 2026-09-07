@@ -93,17 +93,10 @@ jobs:
           fi
         done
 
-    - name: Update file list
-      run: |
-        ls data/*.jsonl | sed 's|data/||' > assets/file-list.txt
-        echo "file-list updated"
-        cat assets/file-list.txt | tail -20
-
     - name: Prepare data files for data branch
       run: |
-        mkdir -p /tmp/data_files/data /tmp/data_files/assets
+        mkdir -p /tmp/data_files/data
         cp -r data/* /tmp/data_files/data/
-        cp assets/file-list.txt /tmp/data_files/assets/
         echo "prepared dates: ${{ steps.prepare.outputs.dates }}"
 
     - name: Commit and push to data branch
@@ -120,7 +113,8 @@ jobs:
 
         mkdir -p data assets
         cp -r /tmp/data_files/data/* data/
-        cp /tmp/data_files/assets/file-list.txt assets/
+        # 基于 data 分支全部文件重建列表，避免补跑覆盖掉其它日期
+        ls data/*.jsonl | sed 's|data/||' | sort > assets/file-list.txt
 
         git add data/* assets/file-list.txt
         if git diff --staged --quiet; then
