@@ -15,7 +15,7 @@ on:
       - '.github/trigger-recover-dates.txt'
   schedule:
     # merge token 可能不触发 push；用调度兜底执行 trigger 文件中的补爬
-    - cron: "*/20 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
