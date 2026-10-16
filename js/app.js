@@ -758,12 +758,11 @@ function initDatePicker() {
     defaultDate: availableDates[0],
     enable: [
       function(date) {
-        // 只启用有效日期
+        // 只启用确实有 AI 增强数据的日期，避免点到无数据天显示空列表
         const dateStr = date.getFullYear() + "-" +
                         String(date.getMonth() + 1).padStart(2, '0') + "-" +
                         String(date.getDate()).padStart(2, '0');
-        // 在 availableDates[0] 之后的日期全部返回 false，否则返回 true
-        return dateStr <= availableDates[0];
+        return Boolean(enabledDatesMap[dateStr]);
       }
     ],
     onChange: function(selectedDates, dateStr) {
@@ -776,10 +775,10 @@ function initDatePicker() {
       } else if (!isRangeMode && selectedDates.length === 1) {
         // 处理单个日期选择
         const selectedDate = formatDateForAPI(selectedDates[0]);
-        // if (availableDates.includes(selectedDate)) {
+        if (availableDates.includes(selectedDate)) {
           loadPapersByDate(selectedDate);
           toggleDatePicker();
-        // }
+        }
       }
     }
   });
