@@ -126,8 +126,17 @@ jobs:
 
         mkdir -p data assets
         cp -r /tmp/data_files/data/* data/
-        # 基于 data 分支全部文件重建列表，避免补跑覆盖掉其它日期
-        ls data/*.jsonl | sed 's|data/||' | sort > assets/file-list.txt
+        # 基于 data 分支全部非空文件重建列表，避免补跑覆盖掉其它日期 / 空 AI 文件
+        : > assets/file-list.txt
+        for f in data/*.jsonl; do
+          [ -e "$f" ] || continue
+          if [ -s "$f" ]; then
+            basename "$f" >> assets/file-list.txt
+          else
+            echo "跳过空文件: $f"
+          fi
+        done
+        sort -o assets/file-list.txt assets/file-list.txt
 
         git add data/* assets/file-list.txt
         if git diff --staged --quiet; then

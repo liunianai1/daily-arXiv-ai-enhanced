@@ -337,7 +337,19 @@ jobs:
         # 确保目录存在 / Ensure directories exist
         mkdir -p data assets
         cp -r /tmp/data_files/data/* data/ 2>/dev/null || true
-        cp /tmp/data_files/assets/file-list.txt assets/ 2>/dev/null || true
+
+        # 基于 data 分支全部非空文件重建列表，避免只保留当天、以及空 AI 文件污染日历
+        # Rebuild full file-list from all non-empty data files on the data branch
+        : > assets/file-list.txt
+        for f in data/*.jsonl; do
+          [ -e "$f" ] || continue
+          if [ -s "$f" ]; then
+            basename "$f" >> assets/file-list.txt
+          else
+            echo "跳过空文件: $f / Skipping empty file: $f"
+          fi
+        done
+        sort -o assets/file-list.txt assets/file-list.txt
         
         # 只添加数据文件 / Only add data files
         git add data/* 2>/dev/null || true

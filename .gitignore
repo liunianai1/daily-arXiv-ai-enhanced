@@ -17,3 +17,7 @@ package-lock.json
 yarn.lock
 .DS_Store
 package.json
+
+# Local/data-branch artifacts (published from the data branch only)
+data/
+assets/file-list.txt
