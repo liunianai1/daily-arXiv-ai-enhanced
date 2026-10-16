@@ -1,0 +1,136 @@
+# 用 arXiv API（submittedDate）补爬缺失日期的原始 jsonl，再跑 AI 增强
+name: recover-missing-dates
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_dates:
+        description: "Comma-separated UTC dates YYYY-MM-DD"
+        required: true
+        type: string
+  push:
+    branches:
+      - liunianai1-patch-1
+    paths:
+      - '.github/trigger-recover-dates.txt'
+  schedule:
+    # merge token 可能不触发 push；用调度兜底执行 trigger 文件中的补爬
+    - cron: "*/20 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv sync
+
+      - name: Resolve dates
+        id: prep
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            DATES_RAW="${{ inputs.target_dates }}"
+          else
+            DATES_RAW="$(tr -d '\r' < .github/trigger-recover-dates.txt | head -n1)"
+          fi
+          DATES=$(echo "$DATES_RAW" | tr ',' ' ' | xargs)
+          test -n "$DATES"
+
+          # 调度触发时：若这些日期的 AI 文件都已非空，则跳过，避免空转
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            git fetch origin data:data
+            NEED=""
+            LANGUAGE="${{ vars.LANGUAGE }}"
+            for d in $DATES; do
+              size=$(git cat-file -s "data:data/${d}_AI_enhanced_${LANGUAGE}.jsonl" 2>/dev/null || echo 0)
+              if [ "${size:-0}" = "0" ]; then
+                NEED="$NEED $d"
+              fi
+            done
+            NEED=$(echo "$NEED" | xargs)
+            if [ -z "$NEED" ]; then
+              echo "All recover dates already have AI data; skipping."
+              echo "dates=" >> "$GITHUB_OUTPUT"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            DATES="$NEED"
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "dates=$DATES" >> "$GITHUB_OUTPUT"
+          echo "Recover dates: $DATES"
+
+      - name: Fetch papers by submittedDate + AI enhance
+        if: steps.prep.outputs.skip != 'true' && steps.prep.outputs.dates != ''
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
+          export LANGUAGE="${{ vars.LANGUAGE }}"
+          export MODEL_NAME="${{ vars.MODEL_NAME }}"
+          export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
+          export CATEGORIES="${{ vars.CATEGORIES }}"
+
+          mkdir -p data
+          for d in ${{ steps.prep.outputs.dates }}; do
+            echo "===== Recover $d ====="
+            python daily_arxiv/backfill_by_date.py --date "$d" --output "data/${d}.jsonl"
+            lines=$(wc -l < "data/${d}.jsonl" | tr -d ' ')
+            echo "raw lines=$lines"
+            test "$lines" -gt 0
+
+            (cd ai && python enhance.py --data "../data/${d}.jsonl")
+            AI="data/${d}_AI_enhanced_${LANGUAGE}.jsonl"
+            test -s "$AI"
+            echo "AI lines=$(wc -l < "$AI")"
+
+            (cd to_md && python convert.py --data "../$AI")
+            test -s "data/${d}.md"
+          done
+
+          mkdir -p /tmp/data_files/data
+          cp -r data/* /tmp/data_files/data/
+
+      - name: Commit to data branch
+        if: steps.prep.outputs.skip != 'true' && steps.prep.outputs.dates != ''
+        run: |
+          set -euo pipefail
+          git config user.email "${{ vars.EMAIL }}"
+          git config user.name "${{ vars.NAME }}"
+
+          rm -rf data/*.jsonl data/*.md 2>/dev/null || true
+          git fetch origin data:data
+          git checkout data
+          git pull origin data || true
+          mkdir -p data assets
+          cp -r /tmp/data_files/data/* data/
+
+          : > assets/file-list.txt
+          for f in data/*.jsonl; do
+            [ -e "$f" ] || continue
+            [ -s "$f" ] && basename "$f" >> assets/file-list.txt
+          done
+          sort -o assets/file-list.txt assets/file-list.txt
+
+          git add data/* assets/file-list.txt
+          if git diff --staged --quiet; then
+            echo "No data changes"
+          else
+            git commit -m "recover: ${{ steps.prep.outputs.dates }}"
+          fi
+
+          git config pull.rebase true
+          for i in 1 2 3; do
+            git push origin data && break
+            git pull origin data --no-edit || true
+            [ "$i" -eq 3 ] && exit 1
+          done
