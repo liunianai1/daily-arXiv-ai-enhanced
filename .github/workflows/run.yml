@@ -5,7 +5,10 @@ name: arXiv-daily-ai-enhanced
 
 on:
   schedule:
+    # 主定时：UTC 18:30
     - cron: "30 18 * * *"
+    # 备份定时：若主定时被 GitHub 跳过，两小时后再跑一次
+    - cron: "30 20 * * *"
   workflow_dispatch:
 
 
@@ -45,16 +48,30 @@ jobs:
         export CATEGORIES="${{ vars.CATEGORIES }}"
         export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
-        # 使用Scrapy爬取
-        # Use Scrapy to crawl
+        # 使用Scrapy爬取；若元数据接口异常（如 HTTP 406）导致 0 篇，则用 API 按日期回退
+        # Use Scrapy; fall back to submittedDate API query when the crawl yields 0 papers
+        set +e
         scrapy crawl arxiv -o ../data/${today}.jsonl
-        
-        # 检查爬取是否成功 / Check if crawling was successful
+        crawl_rc=$?
+        set -e
+
+        line_count=0
+        if [ -f "../data/${today}.jsonl" ]; then
+          line_count=$(wc -l < "../data/${today}.jsonl" | tr -d ' ')
+        fi
+
+        if [ "${line_count}" -eq 0 ]; then
+          echo "Scrapy 产出 0 篇（exit=$crawl_rc），尝试 export.arxiv.org submittedDate 回退补爬..."
+          python daily_arxiv/backfill_by_date.py --date "${today}" --output "../data/${today}.jsonl"
+          line_count=$(wc -l < "../data/${today}.jsonl" | tr -d ' ')
+        fi
+
         if [ ! -f "../data/${today}.jsonl" ]; then
             echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
             exit 1
         fi
-        
+
+        echo "爬取论文数: ${line_count} / Crawled papers: ${line_count}"
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
         echo "爬取完成 / Crawling completed"
         
