@@ -1,0 +1,129 @@
+# 定时自愈：补跑空 AI 文件，并用 TOKEN_GITHUB（若可用）推送以刷新 Pages
+name: oneshot-backfill-and-pages
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  backfill-and-refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          uv sync
+
+      - name: Backfill empty AI dates if needed
+        id: backfill
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+          export OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
+          export LANGUAGE="${{ vars.LANGUAGE }}"
+          export MODEL_NAME="${{ vars.MODEL_NAME }}"
+          export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
+          export CATEGORIES="${{ vars.CATEGORIES }}"
+
+          git fetch origin data:data
+          mkdir -p data
+
+          NEED=""
+          while IFS= read -r path; do
+            day=$(basename "$path" | sed -E 's/_AI_enhanced_.*//')
+            size=$(git cat-file -s "data:$path" 2>/dev/null || echo 0)
+            if git cat-file -e "data:data/${day}.jsonl" 2>/dev/null; then
+              if [ "${size:-0}" = "0" ]; then
+                NEED="$NEED $day"
+              fi
+            fi
+          done < <(git ls-tree -r --name-only data data | rg '_AI_enhanced_.*\.jsonl$' || true)
+
+          if [ -f .github/trigger-backfill-dates.txt ]; then
+            TRIG=$(tr -d '\r' < .github/trigger-backfill-dates.txt | head -n1 | tr ',' ' ')
+            for d in $TRIG; do
+              case "$d" in \#*) continue ;; esac
+              [ -z "$d" ] && continue
+              size=$(git cat-file -s "data:data/${d}_AI_enhanced_${LANGUAGE}.jsonl" 2>/dev/null || echo 0)
+              if [ "${size:-0}" = "0" ] && git cat-file -e "data:data/${d}.jsonl" 2>/dev/null; then
+                NEED="$NEED $d"
+              fi
+            done
+          fi
+
+          NEED=$(echo "$NEED" | xargs | tr ' ' '\n' | sort -u | tr '\n' ' ' | xargs)
+          echo "dates=$NEED" >> "$GITHUB_OUTPUT"
+          if [ -z "$NEED" ]; then
+            echo "无需补跑"
+            echo "did_backfill=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "补跑日期: $NEED"
+          echo "did_backfill=true" >> "$GITHUB_OUTPUT"
+
+          for d in $NEED; do
+            git show "data:data/${d}.jsonl" > "data/${d}.jsonl"
+            (cd ai && python enhance.py --data "../data/${d}.jsonl")
+            AI="data/${d}_AI_enhanced_${LANGUAGE}.jsonl"
+            test -s "$AI"
+            (cd to_md && python convert.py --data "../$AI")
+          done
+
+          mkdir -p /tmp/data_files/data
+          cp -r data/* /tmp/data_files/data/
+
+          git config user.email "${{ vars.EMAIL }}"
+          git config user.name "${{ vars.NAME }}"
+          rm -rf data/*.jsonl data/*.md 2>/dev/null || true
+          git checkout data
+          git pull origin data || true
+          mkdir -p data assets
+          cp -r /tmp/data_files/data/* data/
+          : > assets/file-list.txt
+          for f in data/*.jsonl; do
+            [ -e "$f" ] || continue
+            [ -s "$f" ] && basename "$f" >> assets/file-list.txt
+          done
+          sort -o assets/file-list.txt assets/file-list.txt
+          git add data/* assets/file-list.txt
+          if ! git diff --staged --quiet; then
+            git commit -m "backfill: reprocess empty AI dates (${NEED})"
+            git push origin data
+          fi
+
+      - name: Force Pages refresh from code branch
+        env:
+          TOKEN_GITHUB: ${{ secrets.TOKEN_GITHUB }}
+        run: |
+          set -euo pipefail
+          git fetch origin liunianai1-patch-1
+          git checkout liunianai1-patch-1
+          git pull origin liunianai1-patch-1 || true
+          git config user.email "${{ vars.EMAIL }}"
+          git config user.name "${{ vars.NAME }}"
+
+          # Prefer PAT so the push can trigger legacy Pages rebuild
+          if [ -n "${TOKEN_GITHUB:-}" ]; then
+            git remote set-url origin "https://x-access-token:${TOKEN_GITHUB}@github.com/${{ github.repository }}.git"
+          fi
+
+          # Touch a pages-visible file only if app.js fix is present but site may be stale
+          if ! grep -q 'enabledDatesMap\[dateStr\]' js/app.js; then
+            echo "app.js fix missing on branch; skip pages bump"
+            exit 0
+          fi
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          printf '\n<!-- pages-refresh %s -->\n' "$DATE" >> index.html
+          git add index.html
+          git commit -m "chore: refresh GitHub Pages after calendar fix"
+          git push origin liunianai1-patch-1
